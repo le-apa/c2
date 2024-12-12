@@ -1,4 +1,4 @@
-﻿{-# LANGUAGE RecordWildCards  #-}
+{-# LANGUAGE RecordWildCards  #-}
 --
 -- INFOB3CC Concurrency
 -- Practical 2: Single Source Shortest Path
