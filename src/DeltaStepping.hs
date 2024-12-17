@@ -132,31 +132,70 @@ step
     -> Buckets
     -> TentativeDistances
     -> IO ()
-step verbose threadCount graph delta buckets distances = do
-  -- In this function, you need to implement the body of the outer while loop,
-  -- which contains another while loop.
-  -- See function 'deltaStepping' for inspiration on implementing a while loop
-  -- in a functional language.
-  -- For debugging purposes, you may want to place:
-  --   printVerbose verbose "inner step" graph delta buckets distances
-  -- in the inner loop.
-  undefined
+step graph delta buck tent = do
+-- Find index i of the first non-empty bucket.
+  buckets@(Buckets bIndex bArray) <- readMVar buck
+  firstIndex <- findNextBucket buckets
+  oldTicket <- readForCAS bIndex
+  incrementIndex bIndex oldTicket firstIndex
+-- Repeatedly handle all outgoing light edges from nodes B[i]:
+  handleEdges bArray firstIndex delta Set.empty
+-- When the bucket remains empty, handle all outgoing heavy edges of nodes that have been in B[i]:
+  -- • Find requests of light edges
+  -- • Relax requests'
+-- end step
+  return ()
+  where
+    -- Repeatedly handle all outgoing light edges from nodes B[i]:
+    handleEdges :: V.IOVector IntSet -> Int -> Distance -> IntSet -> IO()
+    handleEdges bucketArray firstIndex d visitedNodes = do
+      contentsAtIndex <- V.read bucketArray firstIndex
+      if Set.null contentsAtIndex then return ()
+      else do
+        -- • Remove all nodes from B[i] (make it empty)
+        V.write bucketArray firstIndex Set.empty
+        (Buckets i _) <- takeMVar buck
+        putMVar buck $ Buckets i bucketArray
+        --let nodesOnIndex = Set.toAscList contentsAtIndex
+        -- • Find requests of light edges
+        lightRequests <- findRequests (<= d) graph contentsAtIndex tent
+        -- • Relax requests'
+        relaxRequests buck tent d lightRequests
+        -- • Keep track of all nodes that have been in this bucket
+        let newVisitedNodes = Set.union visitedNodes contentsAtIndex
+        handleEdges bucketArray firstIndex d newVisitedNodes
+
+    incrementIndex ioRef oldTicket firstIndex  = do
+        (flag,_) <- casIORef ioRef oldTicket $ firstIndex + 1
+        if flag then return () else incrementIndex ioRef oldTicket firstIndex
 
 
 -- Once all buckets are empty, the tentative distances are finalised and the
 -- algorithm terminates.
 --
 allBucketsEmpty :: Buckets -> IO Bool
-allBucketsEmpty buckets = do
-  undefined
+allBucketsEmpty buck = do
+    (Buckets first_index bucket_array) <- readMVar buck
+    j <- readIORef first_index
+    let numBuckets = V.length bucket_array -- Number of buckets
+    buckets <- forM [0 .. numBuckets - 1] $ \i -> V.read bucket_array ((j + i) `rem` numBuckets)
+    return (all (==True) (map checkBuckets buckets))
 
+checkBuckets :: IntSet -> Bool
+checkBuckets i = if i == Set.empty then True else False
 
 -- Return the index of the smallest on-empty bucket. Assumes that there is at
 -- least one non-empty bucket remaining.
 --
 findNextBucket :: Buckets -> IO Int
-findNextBucket buckets = do
-  undefined
+findNextBucket Buckets{..} = do
+    firstIndex <- readIORef first_index --Read value IORef
+    let numBuckets = V.length bucket_array -- Number of buckets
+    buckets <- forM [0 .. numBuckets - 1] $ \i -> V.read bucket_array ((firstIndex + i) `mod` numBuckets) -- List of IntSets
+    let nonEmptyBuckets = filter (/= Set.empty) buckets -- Filter the empty buckets
+        cyclicBuckets = drop 1 $ cycle nonEmptyBuckets -- Creates cyclic list by dropping first element
+        smallestIndex = maybe 0 (\i -> (firstIndex + i + 1) `mod` numBuckets) $ L.findIndex (/= Set.empty) cyclicBuckets -- Get index of first non-empty bucket, then get the position of this index in the vector
+    return (smallestIndex)
 
 
 -- Create requests of (node, distance) pairs that fulfil the given predicate
@@ -169,7 +208,16 @@ findRequests
     -> TentativeDistances
     -> IO (IntMap Distance)
 findRequests threadCount p graph v' distances = do
-  undefined
+  tent <- readMVar distances --get the list of tentative distances from source
+  let indexList = Set.toAscList v' 
+  let neighborsOfN = map(G.neighbors graph) indexList
+  
+  distanceList <- mapM (\x ->M.read tent x) indexList --make a list of all distances from the selected nodes
+  let distIndexList = zip indexList distanceList 
+      filteredDistIndexList = filter (p.snd) distIndexList --filtered list with either the light or heavy edges
+
+      filteredIntMap = Map.fromList filteredDistIndexList
+  return filteredIntMap
 
 
 -- Execute requests for each of the given (node, distance) pairs
@@ -181,8 +229,10 @@ relaxRequests
     -> Distance
     -> IntMap Distance
     -> IO ()
-relaxRequests threadCount buckets distances delta req = do
-  undefined
+relaxRequests buck tent delta req = do
+  let nodeDistList = Map.toList req
+  forM_ nodeDistList $ \(x, y) -> do  -- for each (node, distance) calculate relax
+    relax buck tent delta (x, y)
 
 
 -- Execute a single relaxation, moving the given node to the appropriate bucket
@@ -193,8 +243,29 @@ relax :: Buckets
       -> Distance
       -> (Node, Distance) -- (w, x) in the paper
       -> IO ()
-relax buckets distances delta (node, newDistance) = do
-  undefined
+relax buck safeTent delta (x, w) = do
+  tent <- readMVar safeTent
+  tentX <- M.read tent x
+  (Buckets bIndex bArray) <- takeMVar buck
+  currentBucket <- V.read bArray x
+  if w < tentX           -- If distance smaller then tentDistance of node
+    then do
+      let updatedBucket = Set.delete x currentBucket -- Delete IntSet out of the current bucket
+      V.write bArray x updatedBucket -- Update bucket_array
+      putMVar buck $ Buckets bIndex bArray 
+      let newBuckIndex = floor $ w / delta        -- calculate new bucket
+      if newBuckIndex < V.length bArray           -- if it's in bounds
+        then do
+          newBucket <- V.read bArray newBuckIndex 
+          let updatedNewBucket = Set.insert x newBucket -- Insert node in bucket
+          (Buckets bIndex bArray) <- takeMVar buck
+          V.write bArray newBuckIndex updatedNewBucket  -- Update bucket_array
+          putMVar buck $ Buckets bIndex bArray
+      else 
+        return()
+    else
+      return ()
+
 
 
 -- -----------------------------------------------------------------------------
